@@ -44,7 +44,7 @@ class UnifiedControllerGUI(ctk.CTk):
         self.fg_recording = False
         self._fg_record_thread = None
         self._fg_stop_event = threading.Event()
-        self.sample_interval = 0.5
+        self.sample_interval = 0.05
         self.output_file = ""
         self._force_mode = True  # True = Tension
         self._baud_rate = "high"
