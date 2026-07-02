@@ -1,26 +1,65 @@
 import pigpio
 import time
 
-pi = pigpio.pi() #create pigpio object
-LED_PIN = 18 # Define the GPIO port to which the LED is connected.
-PWM_FREQUENCY = 50 #define the PWM frequency in Hz
-PWM_range = 1000
-PWM_DUTYCYCLE = 0 # Define PWM duty cycle, value range 0 (2) 55,
-pi.set_mode(LED_PIN, pigpio.OUTPUT) #Set the GPIO port to output mode
-pi.set_PWM_frequency(LED_PIN, PWM_FREQUENCY) #set PWM frequency
-pi.set_PWM_range(LED_PIN, PWM_range) # set range 1000
+# --- Configuration ---
+LED_PIN = 18          # GPIO Pin
+PWM_FREQUENCY = 50    # 50 Hz
+PWM_RANGE = 1000      # Resolution of the PWM (0 to 1000)
 
-pi.set_PWM_dutycycle(LED_PIN, 75) # set PWM duty cycle 75/1000=7.5 per cent
-time.sleep(3) # delay 3s unlock successful
+# --- Bounds configuration ---
+NEUTRAL = 75
+RANGE_SPAN = 25.0     # 100 - 75 or 75 - 50
 
-pi.set_PWM_dutycycle(LED_PIN, 80)
-# Positive rotation 7.5%-10% duty cycle, the larger the duty cycle, the faster the positive rotation speed
-time.sleep(15)
+# --- Initialization ---
+pi = pigpio.pi()
+if not pi.connected:
+    print("Failed to connect to pigpio daemon. Is 'sudo pigpiod' running?")
+    exit()
 
-pi.set_PWM_dutycycle(LED_PIN, 70)
-# Reverse The closer the duty cycle is to 5%, the faster the reversal speed is
-time.sleep(5)
+pi.set_mode(LED_PIN, pigpio.OUTPUT)
+pi.set_PWM_frequency(LED_PIN, PWM_FREQUENCY)
+pi.set_PWM_range(LED_PIN, PWM_RANGE)
 
-pi.set_PWM_dutycycle(LED_PIN, 75)
-# Duty cycle
-time.sleep(5)
+def set_motor_speed(duty_value):
+    """Sets motor speed and automatically prints direction and percentage."""
+    if duty_value == NEUTRAL:
+        status = "Neutral (0%)"
+    elif duty_value > NEUTRAL:
+        pct = ((duty_value - NEUTRAL) / RANGE_SPAN) * 100
+        status = f"Forward ({pct:.0f}%)"
+    else:
+        pct = ((NEUTRAL - duty_value) / RANGE_SPAN) * 100
+        status = f"Reverse ({pct:.0f}%)"
+        
+    print(f"Target: {duty_value:<3} | Current Action: {status}")
+    pi.set_PWM_dutycycle(LED_PIN, duty_value)
+
+# --- Main Execution Sequence ---
+try:
+    print("Starting motor sequence")
+    print("-" * 50)
+
+    # 1. Unlock / Neutral
+    set_motor_speed(75)
+    time.sleep(3)
+
+    # 2. 20% Forward
+    set_motor_speed(80)
+    time.sleep(15)
+
+    # 3. 20% Reverse
+    set_motor_speed(70)
+    time.sleep(5)
+
+    # 4. Return to Neutral
+    set_motor_speed(75)
+    time.sleep(5)
+
+except KeyboardInterrupt:
+    print("\nSequence interrupted by user.")
+
+finally:
+    print("\n🧹 Cleaning up: Ensuring motor is neutral.")
+    pi.set_PWM_dutycycle(LED_PIN, NEUTRAL)
+    pi.stop()
+    print("Done.")
