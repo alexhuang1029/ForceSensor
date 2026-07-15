@@ -22,6 +22,12 @@ except ImportError:
     print("[ERROR] goprocam not found. Install with: pip install goprocam")
     sys.exit(1)
 
+try:
+    import pigpio
+except ImportError:
+    print("[ERROR] pigpio not found. Run: pip install pigpio")
+    sys.exit(1)
+
 # Set global modern UI styling
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
@@ -42,8 +48,8 @@ class UnifiedControllerGUI(ctk.CTk):
         self.ng = NexGraph()
         self.fg_connected = False
         self.fg_recording = False
-        self._fg_record_thread = None
-        self._fg_stop_event = threading.Event()
+        self._sync_record_thread = None
+        self._sync_stop_event = threading.Event()
         self.sample_interval = 0.05
         self.output_file = ""
         self._force_mode = True  # True = Tension
@@ -54,9 +60,17 @@ class UnifiedControllerGUI(ctk.CTk):
         self.gp_connected = False
         self.gp_recording = False
 
+        # AMT102 Encoder Configuration
+        self.GPIO_A = 17       # Pin connected to level-shifted Channel A of AMT102
+        self.PPR = 200         # Set to match your encoder DIP switch settings
+        self.pi = None
+        self.encoder_connected = False
+        self.pulse_count = 0
+        self.cb_encoder = None
+
         # ── Window Setup ─────────────────────────────────────────────────────
-        self.title("Unified Force Sensor & GoPro Sync Station")
-        self.geometry("1000x700")
+        self.title("Unified Force, Encoder & GoPro Sync Station")
+        self.geometry("1050x750")
 
         # Layout allocation
         self.grid_rowconfigure(0, weight=1)
@@ -68,14 +82,17 @@ class UnifiedControllerGUI(ctk.CTk):
         
         self.tab_sync = self.tab_view.add("Master Sync Dashboard")
         self.tab_gauge = self.tab_view.add("Force Gauge Config")
+        self.tab_encoder = self.tab_view.add("Encoder Config")
         self.tab_gopro = self.tab_view.add("GoPro Camera Settings")
 
         self._build_sync_tab()
         self._build_gauge_tab()
+        self._build_encoder_tab()
         self._build_gopro_tab()
 
         # Initialize configurations
         self.refresh_ports()
+        self.connect_pi_gpio()
         self.update_ui_states()
 
     def log(self, message: str):
@@ -98,22 +115,25 @@ class UnifiedControllerGUI(ctk.CTk):
         # Status Ribbon Panel
         status_frame = ctk.CTkFrame(self.tab_sync)
         status_frame.grid(row=0, column=0, sticky="ew", padx=15, pady=10)
-        status_frame.grid_columnconfigure((0, 1), weight=1)
+        status_frame.grid_columnconfigure((0, 1, 2), weight=1)
 
         self.lbl_sync_fg_status = ctk.CTkLabel(status_frame, text="Force Gauge: Disconnected", fg_color="#e74c3c", corner_radius=6, height=35)
         self.lbl_sync_fg_status.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
 
-        self.lbl_sync_gp_status = ctk.CTkLabel(status_frame, text="GoPro: Disconnected", fg_color="#e74c3c", corner_radius=6, height=35)
-        self.lbl_sync_gp_status.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
+        self.lbl_sync_enc_status = ctk.CTkLabel(status_frame, text="Encoder (pigpio): Disconnected", fg_color="#e74c3c", corner_radius=6, height=35)
+        self.lbl_sync_enc_status.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
 
-        # Synchronized Master Actions Trigger Deck (Fixed `CTkLabelFrame` -> `CTkFrame`)
+        self.lbl_sync_gp_status = ctk.CTkLabel(status_frame, text="GoPro: Disconnected", fg_color="#e74c3c", corner_radius=6, height=35)
+        self.lbl_sync_gp_status.grid(row=0, column=2, padx=10, pady=10, sticky="ew")
+
+        # Synchronized Master Actions Trigger Deck
         sync_ctrl_frame = ctk.CTkFrame(self.tab_sync)
         sync_ctrl_frame.grid(row=1, column=0, sticky="ew", padx=15, pady=10)
 
-        sync_title = ctk.CTkLabel(sync_ctrl_frame, text="Synchronized System Actions", font=ctk.CTkFont(weight="bold"))
+        sync_title = ctk.CTkLabel(sync_ctrl_frame, text="Synchronized System Actions (Force + Encoder + Video)", font=ctk.CTkFont(weight="bold"))
         sync_title.pack(anchor="w", padx=20, pady=(10, 0))
 
-        self.btn_sync_record = ctk.CTkButton(sync_ctrl_frame, text="🚀 Sync Start Recording (Gauge + Video)", 
+        self.btn_sync_record = ctk.CTkButton(sync_ctrl_frame, text="🚀 Sync Start Recording (All Streams)", 
                                              fg_color="#9b59b6", hover_color="#8e44ad", height=45,
                                              command=self.toggle_synchronized_recording)
         self.btn_sync_record.pack(fill="x", padx=20, pady=15)
@@ -132,7 +152,6 @@ class UnifiedControllerGUI(ctk.CTk):
         self.tab_gauge.grid_columnconfigure(1, weight=1)
         self.tab_gauge.grid_rowconfigure(0, weight=1)
 
-        # Control Panel
         fg_sidebar = ctk.CTkFrame(self.tab_gauge, width=280)
         fg_sidebar.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
@@ -171,7 +190,7 @@ class UnifiedControllerGUI(ctk.CTk):
         self.btn_reset = ctk.CTkButton(grid_f, text="Reset Board", fg_color="#e74c3c", command=self.send_reset)
         self.btn_reset.grid(row=1, column=1, padx=2, pady=4, sticky="ew")
 
-        # Data Logging Dashboard Screen Display
+        # Display Data Card
         fg_main = ctk.CTkFrame(self.tab_gauge)
         fg_main.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
         fg_main.columnconfigure(0, weight=1)
@@ -185,16 +204,55 @@ class UnifiedControllerGUI(ctk.CTk):
 
         rec_frame = ctk.CTkFrame(fg_main)
         rec_frame.grid(row=1, column=0, sticky="ew", padx=15, pady=5)
-        ctk.CTkLabel(rec_frame, text="Interval (s):").pack(side="left", padx=(10, 2))
+        ctk.CTkLabel(rec_frame, text="Sample Interval (s):").pack(side="left", padx=(10, 2))
         self.entry_interval = ctk.CTkEntry(rec_frame, width=60)
         self.entry_interval.insert(0, str(self.sample_interval))
         self.entry_interval.pack(side="left", padx=5, pady=10)
 
-        self.btn_fg_record = ctk.CTkButton(rec_frame, text="🔴 Start Force Log Only", fg_color="#e67e22", command=self.toggle_gauge_recording_standalone)
+        self.btn_fg_record = ctk.CTkButton(rec_frame, text="🔴 Start Isolated Log", fg_color="#e67e22", command=self.toggle_gauge_recording_standalone)
         self.btn_fg_record.pack(side="right", padx=10, pady=10)
 
+    # ─────────────────────────────────────────────────────────────────────────────
+    # TAB 3: ENCODER INTERFACE BUILDER
+    # ─────────────────────────────────────────────────────────────────────────────
+    def _build_encoder_tab(self):
+        self.tab_encoder.grid_columnconfigure(0, weight=1)
+        self.tab_encoder.grid_rowconfigure(0, weight=1)
+
+        enc_container = ctk.CTkFrame(self.tab_encoder)
+        enc_container.grid(row=0, column=0, sticky="nsew", padx=15, pady=15)
+        enc_container.columnconfigure(0, weight=1)
+
+        title = ctk.CTkLabel(enc_container, text="AMT102 Encoder Integration Settings", font=ctk.CTkFont(size=18, weight="bold"))
+        title.pack(anchor="w", padx=20, pady=15)
+
+        # Settings Panel
+        settings_f = ctk.CTkFrame(enc_container)
+        settings_f.pack(fill="x", padx=20, pady=10)
+
+        ctk.CTkLabel(settings_f, text="GPIO Input Pin (Channel A):").grid(row=0, column=0, padx=15, pady=10, sticky="w")
+        self.entry_pin = ctk.CTkEntry(settings_f, width=100)
+        self.entry_pin.insert(0, str(self.GPIO_A))
+        self.entry_pin.grid(row=0, column=1, padx=15, pady=10, sticky="w")
+
+        ctk.CTkLabel(settings_f, text="Encoder PPR Setting:").grid(row=1, column=0, padx=15, pady=10, sticky="w")
+        self.entry_ppr = ctk.CTkEntry(settings_f, width=100)
+        self.entry_ppr.insert(0, str(self.PPR))
+        self.entry_ppr.grid(row=1, column=1, padx=15, pady=10, sticky="w")
+
+        btn_apply = ctk.CTkButton(settings_f, text="Apply & Reinitialize GPIO", command=self.apply_encoder_configs)
+        btn_apply.grid(row=2, column=0, columnspan=2, padx=15, pady=15, sticky="ew")
+
+        # Telemetry Display Card
+        self.enc_card = ctk.CTkFrame(enc_container, fg_color=("#dbdbdb", "#2b2b2b"))
+        self.enc_card.pack(fill="x", padx=20, pady=15)
+        self.lbl_live_rpm = ctk.CTkLabel(self.enc_card, text="--- RPM", font=ctk.CTkFont(size=44, weight="bold"))
+        self.lbl_live_rpm.pack(pady=15)
+        self.lbl_total_edges = ctk.CTkLabel(self.enc_card, text="Accrued Pulse Edges: 0")
+        self.lbl_total_edges.pack(pady=(0, 15))
+
     # ─────────────────────────────────────────────────────────────────────
-    # TAB 3: GOPRO INTERFACE BUILDER
+    # TAB 4: GOPRO INTERFACE BUILDER
     # ─────────────────────────────────────────────────────────────────────
     def _build_gopro_tab(self):
         self.tab_gopro.grid_columnconfigure(0, weight=1)
@@ -203,7 +261,6 @@ class UnifiedControllerGUI(ctk.CTk):
         gp_container.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         self.tab_gopro.grid_rowconfigure(0, weight=1)
 
-        # Connection Block (Fixed `CTkLabelFrame` -> `CTkFrame`)
         conn_box = ctk.CTkFrame(gp_container)
         conn_box.pack(fill="x", padx=15, pady=10)
         
@@ -213,7 +270,6 @@ class UnifiedControllerGUI(ctk.CTk):
         self.btn_gp_connect = ctk.CTkButton(conn_box, text="Connect to GoPro (HERO4 Wi-Fi)", command=lambda: self.run_async(self.connect_gopro))
         self.btn_gp_connect.pack(fill="x", padx=15, pady=15)
 
-        # Settings Configuration Blocks (Fixed `CTkLabelFrame` -> `CTkFrame`)
         self.gp_settings_box = ctk.CTkFrame(gp_container)
         self.gp_settings_box.pack(fill="x", padx=15, pady=10)
 
@@ -238,7 +294,6 @@ class UnifiedControllerGUI(ctk.CTk):
         self.combo_iso.set("Auto")
         self.combo_iso.configure(command=lambda e: self.run_async(self.change_gp_iso))
 
-        # Action Execution Blocks (Fixed `CTkLabelFrame` -> `CTkFrame`)
         self.gp_controls_box = ctk.CTkFrame(gp_container)
         self.gp_controls_box.pack(fill="x", padx=15, pady=10)
 
@@ -267,7 +322,7 @@ class UnifiedControllerGUI(ctk.CTk):
         self.btn_power.pack(fill="x", padx=15, pady=15)
 
     # ─────────────────────────────────────────────────────────────────────
-    # STATE MANAGEMENT OPERATIONS
+    # LOCAL STATE & PORT INTERACTION
     # ─────────────────────────────────────────────────────────────────────
     def refresh_ports(self):
         ports = [p.device for p in serial.tools.list_ports.comports()]
@@ -275,8 +330,59 @@ class UnifiedControllerGUI(ctk.CTk):
         self.port_combo.set("Auto-Detect")
         self.log("Scanned local structural buses for active hardware communication serial lines.")
 
+    def connect_pi_gpio(self):
+        """Initializes pigpio connection and configures target input pins."""
+        self.log("Attempting connection to pigpio daemon...")
+        try:
+            self.pi = pigpio.pi()
+            if not self.pi.connected:
+                raise RuntimeError("pigpio daemon connection dropped.")
+            
+            self.encoder_connected = True
+            self.log(" pigpio Daemon connection established successfully.")
+            self.setup_encoder_gpio()
+        except Exception as e:
+            self.encoder_connected = False
+            self.log(f"[GPIO Warning]: pigpio not responding. {e}")
+            messagebox.showwarning("pigpio Not Found", "Unable to establish contact with 'pigpiod'. Run 'sudo pigpiod' inside terminal.")
+
+    def setup_encoder_gpio(self):
+        """Configures the selected pin as input and sets hardware interrupts."""
+        if not self.encoder_connected or not self.pi:
+            return
+        
+        # Clean up existing callbacks
+        if self.cb_encoder:
+            self.cb_encoder.cancel()
+
+        try:
+            self.pi.set_mode(self.GPIO_A, pigpio.INPUT)
+            self.pi.set_pull_up_down(self.GPIO_A, pigpio.PUD_UP)
+            
+            # Count rising and falling edges
+            self.cb_encoder = self.pi.callback(self.GPIO_A, pigpio.EITHER_EDGE, self._on_encoder_pulse)
+            self.log(f"Encoder registered on GPIO Pin {self.GPIO_A} @ {self.PPR} PPR configuration.")
+        except Exception as e:
+            self.log(f"[GPIO Register Error]: Failed setup. {e}")
+
+    def _on_encoder_pulse(self, gpio, level, tick):
+        self.pulse_count += 1
+
+    def apply_encoder_configs(self):
+        try:
+            pin = int(self.entry_pin.get())
+            ppr = int(self.entry_ppr.get())
+            if ppr <= 0 or pin < 0:
+                raise ValueError
+            self.GPIO_A = pin
+            self.PPR = ppr
+            self.setup_encoder_gpio()
+            self.update_ui_states()
+        except ValueError:
+            messagebox.showerror("Configuration Error", "Ensure Pin and PPR settings are positive integers.")
+
     def update_ui_states(self):
-        """Main evaluation rule tree adjusting interactive states of the views."""
+        """Dynamic evaluation rule tree mapping device statuses into UI availability states."""
         # 1. Update Gauge specific views
         if self.fg_connected:
             self.btn_fg_connect.configure(text="Disconnect Gauge", fg_color="#e74c3c")
@@ -294,7 +400,13 @@ class UnifiedControllerGUI(ctk.CTk):
         for w in [self.btn_zero, self.btn_unit, self.btn_track, self.btn_reset, self.btn_fg_record]:
             w.configure(state=fg_state)
 
-        # 2. Update GoPro specific views
+        # 2. Update Encoder status
+        if self.encoder_connected:
+            self.lbl_sync_enc_status.configure(text=f"Encoder: GPIO {self.GPIO_A} Connected", fg_color="#2ecc71")
+        else:
+            self.lbl_sync_enc_status.configure(text="Encoder (pigpio): Offline", fg_color="#e74c3c")
+
+        # 3. Update GoPro specific views
         if self.gp_connected:
             self.btn_gp_connect.configure(text="GoPro Connected (HERO4)", fg_color="#2ecc71")
             self.lbl_sync_gp_status.configure(text="GoPro: Camera Mesh Connected", fg_color="#2ecc71")
@@ -308,13 +420,13 @@ class UnifiedControllerGUI(ctk.CTk):
                   self.btn_mode_video, self.btn_photo, self.btn_video, self.btn_download, self.btn_power]:
             w.configure(state=gp_state)
 
-        # 3. Synchronized Action Button Rules
+        # 4. Synchronized Action Button Rules
         if self.fg_recording or self.gp_recording:
             self.btn_sync_record.configure(text="⏹ Stop Synchronized Recording", fg_color="#7f8c8d")
             self.btn_fg_record.configure(state="disabled")
             self.btn_video.configure(state="disabled")
         else:
-            self.btn_sync_record.configure(text="🚀 Sync Start Recording (Gauge + Video)", fg_color="#9b59b6")
+            self.btn_sync_record.configure(text="🚀 Sync Start Recording (All Streams)", fg_color="#9b59b6")
             if self.fg_connected: self.btn_fg_record.configure(state="normal")
             if self.gp_connected: self.btn_video.configure(state="normal")
 
@@ -323,7 +435,7 @@ class UnifiedControllerGUI(ctk.CTk):
     # ─────────────────────────────────────────────────────────────────────
     def toggle_gauge_connection(self):
         if self.fg_connected:
-            if self.fg_recording: self.stop_gauge_logging_pipeline()
+            if self.fg_recording: self.stop_pipeline()
             self.ng.disconnect()
             self.fg_connected = False
             self.log("Force gauge link terminated cleanly.")
@@ -349,15 +461,16 @@ class UnifiedControllerGUI(ctk.CTk):
                 messagebox.showerror("Bus Error", "Handshake dropped by core sensor serial controller module.")
 
     def toggle_gauge_recording_standalone(self):
+        """Launches recording tracking only the Force Gauge telemetry."""
         if self.fg_recording:
-            self.stop_gauge_logging_pipeline()
+            self.stop_pipeline()
             self.update_ui_states()
         else:
-            if not self.initialize_gauge_filename_context(): return
-            self.start_gauge_logging_pipeline()
+            if not self.initialize_filename_context(): return
+            self.start_pipeline(only_gauge=True)
             self.update_ui_states()
 
-    def initialize_gauge_filename_context(self) -> bool:
+    def initialize_filename_context(self) -> bool:
         try:
             self.sample_interval = float(self.entry_interval.get())
             if self.sample_interval <= 0: raise ValueError
@@ -370,30 +483,33 @@ class UnifiedControllerGUI(ctk.CTk):
         self.output_file = fn
         return True
 
-    def start_gauge_logging_pipeline(self):
-        self._fg_stop_event.clear()
+    def start_pipeline(self, only_gauge=False):
+        self._sync_stop_event.clear()
         self.fg_recording = True
-        self._fg_record_thread = threading.Thread(target=self._gauge_recording_loop, daemon=True)
-        self._fg_record_thread.start()
+        
+        target_loop = self._gauge_only_recording_loop if only_gauge else self._synchronized_recording_loop
+        self._sync_record_thread = threading.Thread(target=target_loop, daemon=True)
+        self._sync_record_thread.start()
         self.log(f"Asynchronous data channel logging explicitly to: {self.output_file}")
 
-    def stop_gauge_logging_pipeline(self):
-        self._fg_stop_event.set()
-        if self._fg_record_thread:
-            self._fg_record_thread.join(timeout=2)
+    def stop_pipeline(self):
+        self._sync_stop_event.set()
+        if self._sync_record_thread:
+            self._sync_record_thread.join(timeout=2)
         self.fg_recording = False
-        self.log("Sensor serialization processing pipeline halted safely.")
+        self.log("Logging and sensor scanning loop safely halted.")
         self.after(0, lambda: self.lbl_live_val.configure(text="---"))
+        self.after(0, lambda: self.lbl_live_rpm.configure(text="--- RPM"))
 
-    def _gauge_recording_loop(self):
+    def _gauge_only_recording_loop(self):
         """Asynchronous collection loops mapping directly into local hardware registers."""
         with open(self.output_file, "w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
-            writer.writerow(["timestamp", "elapsed_s", "value_parsed", "short_output", "long_output"])
+            writer.writerow(["timestamp", "elapsed_s", "force_parsed", "short_output", "long_output"])
             fh.flush()
 
             start_t = time.time()
-            while not self._fg_stop_event.is_set():
+            while not self._sync_stop_event.is_set():
                 try:
                     short = self.ng.short_output()
                     long_ = self.ng.long_output()
@@ -409,7 +525,7 @@ class UnifiedControllerGUI(ctk.CTk):
                 except Exception as e:
                     self.after(0, lambda err=e: self.log(f"[Telemetry Exception Trace]: {err}"))
 
-                self._fg_stop_event.wait(self.sample_interval)
+                self._sync_stop_event.wait(self.sample_interval)
 
     # ── Quick Force Gauge Wrappers ──
     def send_zero(self): self.run_async(lambda: self.log("Zero/Tare: OK") if self.ng.zero() else self.log("Zero failed."))
@@ -491,22 +607,19 @@ class UnifiedControllerGUI(ctk.CTk):
             self.update_ui_states()
 
     # ─────────────────────────────────────────────────────────────────────
-    # MASTER SYSTEM OPERATIONS: SYNCHRONIZED ACQUISITION
+    # MASTER CONSOLIDATED MULTI-DEVICE SYNCHRONIZED ACQUISITION
     # ─────────────────────────────────────────────────────────────────────
     def toggle_synchronized_recording(self):
-        """The core synchronization engine controlling multi-channel hardware states."""
+        """Unified master control script initiating state triggers across all devices."""
         if self.fg_recording or self.gp_recording:
             self.log("Broadcasting stop commands across active system arrays...")
             
-            # 1. Kill the gauge thread
+            # 1. Kill telemetry scanning and file handles
             if self.fg_recording:
-                self._fg_stop_event.set()
-                if self._fg_record_thread:
-                    self._fg_record_thread.join(timeout=2)
-                self.fg_recording = False
-                self.log("Multi-channel master sync force log saved.")
+                self.stop_pipeline()
+                self.log("Multi-channel master sync log saved.")
 
-            # 2. Halt the wireless network shutter matrix
+            # 2. Shut off camera video stream
             if self.gp_recording:
                 def halt_shutter_async():
                     try:
@@ -527,13 +640,16 @@ class UnifiedControllerGUI(ctk.CTk):
             if not self.gp_connected:
                 messagebox.showerror("Sync Execution Error", "Unified recordings require an active GoPro client mesh.")
                 return
+            if not self.encoder_connected:
+                messagebox.showerror("Sync Execution Error", "Unified recordings require a running 'pigpio' connection.")
+                return
 
-            if not self.initialize_gauge_filename_context():
+            if not self.initialize_filename_context():
                 return
 
             self.log("Aligning asynchronous arrays for master sync start sequence...")
 
-            # 1. Run the GoPro wireless video trigger call off the UI main thread
+            # 1. Start GoPro recording off-thread
             def initialize_sync_shutter_async():
                 try:
                     self.gopro.shutter(gp_constants.Shutter.ON)
@@ -542,11 +658,65 @@ class UnifiedControllerGUI(ctk.CTk):
                 except Exception as e:
                     self.log(f"[Sync Critical Failure]: Shutter link failed to connect -> {e}")
                 
-                # 2. Immediately start the localized sensor recording loop
-                self.after(0, self.start_gauge_logging_pipeline)
+                # 2. Immediately initiate synchronized file logger on standard time ticks
+                self.after(0, lambda: self.start_pipeline(only_gauge=False))
                 self.after(0, self.update_ui_states)
 
             self.run_async(initialize_sync_shutter_async)
+
+    def _synchronized_recording_loop(self):
+        """
+        The Master Telemetry Engine: Pulls Force and Encoder ticks simultaneously 
+        at a fixed time frequency, printing and saving them to a single synced CSV.
+        """
+        with open(self.output_file, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            # Unified data headers
+            writer.writerow(["timestamp", "elapsed_s", "force_parsed", "encoder_pulses_in_tick", "encoder_RPM", "force_raw_short"])
+            fh.flush()
+
+            start_t = time.time()
+            self.pulse_count = 0  # Reset pulse tracking to zero
+            
+            while not self._sync_stop_event.is_set():
+                tick_start = time.time()
+                try:
+                    # 1. Fetch Force Gauge values
+                    force_short = self.ng.short_output()
+                    force_parsed = _parse_number(force_short)
+
+                    # 2. Fetch Encoder values (Thread-safe read of pulse counter)
+                    current_pulses = self.pulse_count
+                    self.pulse_count = 0  # Reset for the next interval segment
+                    
+                    # Either_Edge tracking counts both rising and falling states (2 edges per cycle)
+                    cycles = current_pulses / 2.0
+                    rpm = (cycles / self.PPR) * (60.0 / self.sample_interval)
+
+                    # 3. Compile timing metrics
+                    elapsed = round(time.time() - start_t, 3)
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+                    # 4. Write to Consolidated Log file
+                    writer.writerow([ts, elapsed, force_parsed, current_pulses, round(rpm, 2), force_short])
+                    fh.flush()
+
+                    # 5. Push updates cleanly to Dashboard Cards
+                    f_disp = force_short if force_short else f"{force_parsed}"
+                    self.after(0, lambda d=f_disp: self.lbl_live_val.configure(text=d))
+                    self.after(0, lambda r=rpm, p=current_pulses: self._update_encoder_telemetry_ui(r, p))
+
+                except Exception as e:
+                    self.after(0, lambda err=e: self.log(f"[Telemetry Exception Trace]: {err}"))
+
+                # Keep loop timings uniform by subtracting processing overhead delay
+                work_time = time.time() - tick_start
+                remaining_delay = max(0, self.sample_interval - work_time)
+                self._sync_stop_event.wait(remaining_delay)
+
+    def _update_encoder_telemetry_ui(self, rpm_val, pulses):
+        self.lbl_live_rpm.configure(text=f"{rpm_val:.1f} RPM")
+        self.lbl_total_edges.configure(text=f"Last Tick Edges: {pulses}")
 
 
 if __name__ == "__main__":
