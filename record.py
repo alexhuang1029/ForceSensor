@@ -50,7 +50,7 @@ class UnifiedControllerGUI(ctk.CTk):
         self.fg_recording = False
         self._sync_record_thread = None
         self._sync_stop_event = threading.Event()
-        self.sample_interval = 0.05
+        self.sample_interval = 0.1
         self.output_file = ""
         self._force_mode = True  # True = Tension
         self._baud_rate = "high"
@@ -62,7 +62,7 @@ class UnifiedControllerGUI(ctk.CTk):
 
         # AMT102 Encoder Configuration
         self.GPIO_A = 17       # Pin connected to level-shifted Channel A of AMT102
-        self.PPR = 200         # Set to match your encoder DIP switch settings
+        self.PPR = 500         # Set to match your encoder DIP switch settings
         self.pi = None
         self.encoder_connected = False
         self.pulse_count = 0
