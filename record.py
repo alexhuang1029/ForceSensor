@@ -620,7 +620,7 @@ class UnifiedControllerGUI(ctk.CTk):
     async def _async_connect_hero12(self):
         """Asynchronous BLE connection managed entirely by open-gopro."""
         try:
-            self.hero12 = GoPro()
+            self.hero12 = WirelessGoPro()
             await self.hero12.open()
             self.gp_connected = True
             self.is_hero12 = True
