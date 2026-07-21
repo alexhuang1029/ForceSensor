@@ -1,3 +1,15 @@
+import os
+import locale
+
+# Force en_US locale so open_gopro CLI parser receives expected string formats
+os.environ["LC_ALL"] = "en_US.UTF-8"
+os.environ["LANG"] = "en_US.UTF-8"
+
+try:
+    locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
+except Exception:
+    pass  # Fallback if specific locale alias isn't registered on OS
+
 import sys
 import time
 import csv
