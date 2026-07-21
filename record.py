@@ -3,6 +3,7 @@ import time
 import csv
 import re
 import threading
+import asyncio
 from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox, filedialog, ttk
@@ -22,6 +23,41 @@ except ImportError:
     print("[ERROR] goprocam not found. Install with: pip install goprocam")
     sys.exit(1)
 
+# NEW BLOCK
+# ── GoPro HERO12 BLE Setup ──────────────────────────────────────────────────
+try:
+    import open_gopro
+    
+    # 1. Resolve GoPro Client Class
+    if hasattr(open_gopro, "WirelessGoPro"):
+        WirelessGoPro = open_gopro.WirelessGoPro
+    elif hasattr(open_gopro, "GoPro"):
+        WirelessGoPro = open_gopro.GoPro
+    else:
+        from open_gopro.gopro_wire import WirelessGoPro
+
+    # 2. Resolve Params / Toggle Enums across versions
+    ogp_params = None
+    for mod_path in ["open_gopro.params", "open_gopro.domain.params", "open_gopro"]:
+        try:
+            mod = __import__(mod_path, fromlist=["Params", "constants"])
+            ogp_params = getattr(mod, "Params", getattr(mod, "constants", None))
+            if ogp_params:
+                break
+        except ImportError:
+            continue
+
+    OGP_AVAILABLE = True
+    print("[INFO] open-gopro imported successfully.")
+
+except Exception as e:
+    OGP_AVAILABLE = False
+    print(f"[WARNING] open-gopro load failed: {e}. HERO12 BLE integration disabled.")
+
+    OGP_AVAILABLE = True
+except Exception as e:
+    OGP_AVAILABLE = False
+    print(f"[WARNING] open-gopro import failed with error: {e}")
 try:
     import pigpio
 except ImportError:
@@ -55,10 +91,17 @@ class UnifiedControllerGUI(ctk.CTk):
         self._force_mode = True  # True = Tension
         self._baud_rate = "high"
 
-        # GoPro Camera
+        # GoPro Legacy (HERO4) & Modern (HERO12 Open GoPro)
         self.gopro = None
+        self.hero12 = None
         self.gp_connected = False
         self.gp_recording = False
+        self.is_hero12 = False
+
+        # Open GoPro Background Async Event Loop
+        self.ogp_loop = asyncio.new_event_loop()
+        self.ogp_thread = threading.Thread(target=self._run_asyncio_loop, args=(self.ogp_loop,), daemon=True)
+        self.ogp_thread.start()
 
         # AMT102 Encoder Configuration
         self.GPIO_A = 17       # Pin connected to level-shifted Channel A of AMT102
@@ -104,6 +147,11 @@ class UnifiedControllerGUI(ctk.CTk):
         """Utility wrapper to safely run network/serial calls off the UI main thread."""
         thread = threading.Thread(target=target_func, args=args, daemon=True)
         thread.start()
+
+    def _run_asyncio_loop(self, loop):
+        """Dedicated background loop to handle asynchronous Open GoPro commands."""
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
 
     # ─────────────────────────────────────────────────────────────────────────────
     # TAB 1: MASTER SYNC DASHBOARD BUILDER
@@ -268,7 +316,11 @@ class UnifiedControllerGUI(ctk.CTk):
         conn_title.pack(anchor="w", padx=15, pady=(10, 0))
 
         self.btn_gp_connect = ctk.CTkButton(conn_box, text="Connect to GoPro (HERO4 Wi-Fi)", command=lambda: self.run_async(self.connect_gopro))
-        self.btn_gp_connect.pack(fill="x", padx=15, pady=15)
+        self.btn_gp_connect.pack(fill="x", padx=15, pady=10)
+
+        # Bluetooth connect button for HERO12
+        self.btn_gp12_connect = ctk.CTkButton(conn_box, text="Connect to HERO12 (BLE)", fg_color="#8e44ad", hover_color="#9b59b6", command=self.connect_hero12)
+        self.btn_gp12_connect.pack(fill="x", padx=15, pady=(0, 15))
 
         self.gp_settings_box = ctk.CTkFrame(gp_container)
         self.gp_settings_box.pack(fill="x", padx=15, pady=10)
@@ -408,11 +460,14 @@ class UnifiedControllerGUI(ctk.CTk):
 
         # 3. Update GoPro specific views
         if self.gp_connected:
-            self.btn_gp_connect.configure(text="GoPro Connected (HERO4)", fg_color="#2ecc71")
-            self.lbl_sync_gp_status.configure(text="GoPro: Camera Mesh Connected", fg_color="#2ecc71")
+            btn_text = "HERO12 BLE Connected" if self.is_hero12 else "GoPro Connected (HERO4)"
+            self.btn_gp_connect.configure(text=btn_text, fg_color="#2ecc71", state="disabled")
+            self.btn_gp12_connect.configure(state="disabled")
+            self.lbl_sync_gp_status.configure(text=f"GoPro: {btn_text}", fg_color="#2ecc71")
             gp_state = "normal"
         else:
-            self.btn_gp_connect.configure(text="Connect to GoPro (HERO4 Wi-Fi)", fg_color="#3498db")
+            self.btn_gp_connect.configure(text="Connect to GoPro (HERO4 Wi-Fi)", fg_color="#3498db", state="normal")
+            self.btn_gp12_connect.configure(state="normal")
             self.lbl_sync_gp_status.configure(text="GoPro: Disconnected", fg_color="#e74c3c")
             gp_state = "disabled"
 
@@ -425,10 +480,13 @@ class UnifiedControllerGUI(ctk.CTk):
             self.btn_sync_record.configure(text="⏹ Stop Synchronized Recording", fg_color="#7f8c8d")
             self.btn_fg_record.configure(state="disabled")
             self.btn_video.configure(state="disabled")
+            if self.gp_recording:
+                self.btn_video.configure(text="🛑 Stop Recording Only", fg_color="#e74c3c")
         else:
             self.btn_sync_record.configure(text="🚀 Sync Start Recording (All Streams)", fg_color="#9b59b6")
             if self.fg_connected: self.btn_fg_record.configure(state="normal")
-            if self.gp_connected: self.btn_video.configure(state="normal")
+            if self.gp_connected:
+                self.btn_video.configure(state="normal", text="🎥 Start Video Recording Only", fg_color="#e67e22")
 
     # ─────────────────────────────────────────────────────────────────────
     # HARDWARE LAYER: FORCE GAUGE CORE ACTIONS
@@ -537,10 +595,12 @@ class UnifiedControllerGUI(ctk.CTk):
     # HARDWARE LAYER: GOPRO WIRELESS NETWORK CORE ACTIONS
     # ─────────────────────────────────────────────────────────────────────
     def connect_gopro(self):
+        """Legacy HTTP connect for HERO4."""
         self.log("Scanning system network gateways for explicit GoPro HERO4 endpoints...")
         try:
             self.gopro = GoProCamera.GoPro(gp_constants.gpcontrol)
             self.gp_connected = True
+            self.is_hero12 = False
             self.log("GoPro client connection verified over standard network API interfaces.")
         except Exception as e:
             self.gp_connected = False
@@ -548,21 +608,59 @@ class UnifiedControllerGUI(ctk.CTk):
             self.after(0, lambda: messagebox.showerror("Camera Network Error", f"Failed to secure access to the local camera network.\n\n{e}"))
         self.after(0, self.update_ui_states)
 
+    def connect_hero12(self):
+        """Initiates Bluetooth discovery for HERO12 via background asyncio thread."""
+        if not OGP_AVAILABLE:
+            messagebox.showerror("Dependency Error", "open-gopro package is missing. Cannot initialize BLE connection.")
+            return
+        
+        self.log("Scanning BLE frequencies for HERO12 advertising payloads...")
+        asyncio.run_coroutine_threadsafe(self._async_connect_hero12(), self.ogp_loop)
+
+    async def _async_connect_hero12(self):
+        """Asynchronous BLE connection managed entirely by open-gopro."""
+        try:
+            self.hero12 = GoPro()
+            await self.hero12.open()
+            self.gp_connected = True
+            self.is_hero12 = True
+            self.log("GoPro HERO12 connection verified natively over BLE.")
+            self.after(0, self.update_ui_states)
+        except Exception as e:
+            self.gp_connected = False
+            self.log(f"[BLE Handshake Failed]: {e}")
+            self.after(0, lambda err=e: messagebox.showerror("BLE Error", f"Failed to secure access to HERO12.\n\n{err}"))
+
     def toggle_gopro_recording_standalone(self):
+        """Unified shutter control routing natively based on the connected device type."""
         if self.gp_recording:
-            self.gopro.shutter(gp_constants.Shutter.OFF)
+            if self.is_hero12:
+                asyncio.run_coroutine_threadsafe(
+                    self.hero12.ble_command.set_shutter(shutter=ogp_constants.Toggle.DISABLE), 
+                    self.ogp_loop
+                )
+            else:
+                self.gopro.shutter(gp_constants.Shutter.OFF)
+                
             self.gp_recording = False
-            self.log("GoPro capture operations terminated manually.")
-            self.after(0, lambda: self.btn_video.configure(text="🎥 Start Video Recording Only"))
+            self.log("GoPro recording safely halted.")
         else:
-            self.gopro.shutter(gp_constants.Shutter.ON)
+            if self.is_hero12:
+                asyncio.run_coroutine_threadsafe(
+                    self.hero12.ble_command.set_shutter(shutter=ogp_constants.Toggle.ENABLE), 
+                    self.ogp_loop
+                )
+            else:
+                self.gopro.shutter(gp_constants.Shutter.ON)
+                
             self.gp_recording = True
             self.log("GoPro single-channel digital recording session initiated.")
-            self.after(0, lambda: self.btn_video.configure(text="🛑 Stop Recording"))
+            
         self.after(0, self.update_ui_states)
 
-    # ── Settings & Asset Handlers ──
+    # ── Settings & Asset Handlers (Primarily targeted at Legacy HERO4 HTTP interface) ──
     def change_gp_resolution(self):
+        if self.is_hero12: return # Handled via BLE instead for HERO12
         sel = self.combo_res.get()
         if sel == "1080p 60fps":
             self.gopro.gpControlCommand("setting/2/9"); self.gopro.gpControlCommand("setting/3/5")
@@ -575,22 +673,36 @@ class UnifiedControllerGUI(ctk.CTk):
         self.log(f"GoPro frame matrix changed to -> {sel}")
 
     def change_gp_white_balance(self):
+        if self.is_hero12: return
         sel = self.combo_wb.get()
         m = {"Auto": "0", "3000K (Warm)": "1", "5500K (Daylight)": "2", "6500K (Cloudy)": "3", "Native": "4"}
         self.gopro.gpControlCommand(f"setting/11/{m[sel]}")
         self.log(f"GoPro Color Space Balanced -> {sel}")
 
     def change_gp_iso(self):
+        if self.is_hero12: return
         sel = self.combo_iso.get()
         m = {"Auto": "0", "400": "2", "1600": "1", "6400": "0"}
         self.gopro.gpControlCommand(f"setting/13/{m[sel]}")
         self.log(f"GoPro Light Limit Adjusted -> {sel}")
 
-    def set_gp_photo_mode(self): self.gopro.mode(gp_constants.Mode.PhotoMode); self.log("Camera mode forced to Photo Mode.")
-    def set_gp_video_mode(self): self.gopro.mode(gp_constants.Mode.VideoMode); self.log("Camera mode forced to Video Mode.")
-    def take_gp_photo(self): self.gopro.take_photo(); self.log("Still snapshot transaction successfully committed.")
+    def set_gp_photo_mode(self): 
+        if not self.is_hero12: 
+            self.gopro.mode(gp_constants.Mode.PhotoMode)
+            self.log("Camera mode forced to Photo Mode.")
+
+    def set_gp_video_mode(self): 
+        if not self.is_hero12:
+            self.gopro.mode(gp_constants.Mode.VideoMode)
+            self.log("Camera mode forced to Video Mode.")
+
+    def take_gp_photo(self): 
+        if not self.is_hero12:
+            self.gopro.take_photo()
+            self.log("Still snapshot transaction successfully committed.")
     
     def download_gp_media(self):
+        if self.is_hero12: return # Open GoPro handles assets differently via Wi-Fi HTTP Server
         self.log("Querying storage blocks over Wi-Fi allocations...")
         try:
             self.gopro.downloadLastMedia()
@@ -599,11 +711,15 @@ class UnifiedControllerGUI(ctk.CTk):
             self.after(0, lambda err=e: messagebox.showerror("Transfer Error", f"Asset stream failed -> {err}"))
 
     def power_off_gp(self):
-        if messagebox.askyesno("Power Down", "Terminate wireless connection and turn off camera array power?"):
-            self.gopro.power_off()
+        if messagebox.askyesno("Power Down", "Terminate connection and turn off camera array power?"):
+            if self.is_hero12:
+                asyncio.run_coroutine_threadsafe(self.hero12.ble_command.sleep(), self.ogp_loop)
+            else:
+                self.gopro.power_off()
+            
             self.gp_connected = False
             self.gp_recording = False
-            self.log("GoPro system has been powered off.")
+            self.log("GoPro system has been powered off/disconnected.")
             self.update_ui_states()
 
     # ─────────────────────────────────────────────────────────────────────
@@ -623,7 +739,14 @@ class UnifiedControllerGUI(ctk.CTk):
             if self.gp_recording:
                 def halt_shutter_async():
                     try:
-                        self.gopro.shutter(gp_constants.Shutter.OFF)
+                        if self.is_hero12:
+                            asyncio.run_coroutine_threadsafe(
+                                self.hero12.ble_command.set_shutter(shutter=ogp_constants.Toggle.DISABLE), 
+                                self.ogp_loop
+                            )
+                        else:
+                            self.gopro.shutter(gp_constants.Shutter.OFF)
+                            
                         self.gp_recording = False
                         self.log("GoPro wireless recording array stopped.")
                     except Exception as e:
@@ -638,7 +761,7 @@ class UnifiedControllerGUI(ctk.CTk):
                 messagebox.showerror("Sync Execution Error", "Unified recordings require a connected force gauge asset.")
                 return
             if not self.gp_connected:
-                messagebox.showerror("Sync Execution Error", "Unified recordings require an active GoPro client mesh.")
+                messagebox.showerror("Sync Execution Error", "Unified recordings require an active GoPro connection.")
                 return
             if not self.encoder_connected:
                 messagebox.showerror("Sync Execution Error", "Unified recordings require a running 'pigpio' connection.")
@@ -652,7 +775,14 @@ class UnifiedControllerGUI(ctk.CTk):
             # 1. Start GoPro recording off-thread
             def initialize_sync_shutter_async():
                 try:
-                    self.gopro.shutter(gp_constants.Shutter.ON)
+                    if self.is_hero12:
+                        asyncio.run_coroutine_threadsafe(
+                            self.hero12.ble_command.set_shutter(shutter=ogp_constants.Toggle.ENABLE), 
+                            self.ogp_loop
+                        )
+                    else:
+                        self.gopro.shutter(gp_constants.Shutter.ON)
+                        
                     self.gp_recording = True
                     self.log("GoPro video stream successfully established.")
                 except Exception as e:
