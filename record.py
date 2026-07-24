@@ -572,30 +572,53 @@ class UnifiedControllerGUI(ctk.CTk):
         self.after(0, lambda: self.lbl_live_rpm.configure(text="--- RPM"))
 
     def _gauge_only_recording_loop(self):
-        """Asynchronous collection loops mapping directly into local hardware registers."""
-        with open(self.output_file, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            writer.writerow(["timestamp", "elapsed_s", "force_parsed", "short_output", "long_output"])
-            fh.flush()
+            """Asynchronous collection loops mapping directly into local hardware registers."""
+            with open(self.output_file, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                
+                # Conditionally set header depending on encoder status
+                if self.encoder_connected:
+                    writer.writerow(["timestamp", "elapsed_s", "force_parsed", "encoder_pulses_in_tick", "encoder_RPM", "short_output", "long_output"])
+                else:
+                    writer.writerow(["timestamp", "elapsed_s", "force_parsed", "short_output", "long_output"])
+                fh.flush()
 
-            start_t = time.time()
-            while not self._sync_stop_event.is_set():
-                try:
-                    short = self.ng.short_output()
-                    long_ = self.ng.long_output()
-                    elapsed = round(time.time() - start_t, 3)
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    parsed = _parse_number(short)
+                start_t = time.time()
+                self.pulse_count = 0  # Reset counter before starting
+                
+                while not self._sync_stop_event.is_set():
+                    tick_start = time.time()
+                    try:
+                        short = self.ng.short_output()
+                        long_ = self.ng.long_output()
+                        elapsed = round(time.time() - start_t, 3)
+                        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                        parsed = _parse_number(short)
 
-                    writer.writerow([ts, elapsed, parsed, short, long_])
-                    fh.flush()
+                        if self.encoder_connected:
+                            # Capture and reset pulse count for the interval
+                            current_pulses = self.pulse_count
+                            self.pulse_count = 0
+                            
+                            cycles = current_pulses / 2.0
+                            rpm = (cycles / self.PPR) * (60.0 / self.sample_interval)
 
-                    disp = short if short else f"{parsed}"
-                    self.after(0, lambda d=disp: self.lbl_live_val.configure(text=d))
-                except Exception as e:
-                    self.after(0, lambda err=e: self.log(f"[Telemetry Exception Trace]: {err}"))
+                            writer.writerow([ts, elapsed, parsed, current_pulses, round(rpm, 2), short, long_])
+                            self.after(0, lambda r=rpm, p=current_pulses: self._update_encoder_telemetry_ui(r, p))
+                        else:
+                            writer.writerow([ts, elapsed, parsed, short, long_])
 
-                self._sync_stop_event.wait(self.sample_interval)
+                        fh.flush()
+
+                        disp = short if short else f"{parsed}"
+                        self.after(0, lambda d=disp: self.lbl_live_val.configure(text=d))
+                    except Exception as e:
+                        self.after(0, lambda err=e: self.log(f"[Telemetry Exception Trace]: {err}"))
+
+                    # Keep loop timing accurate by accounting for execution time
+                    work_time = time.time() - tick_start
+                    remaining_delay = max(0, self.sample_interval - work_time)
+                    self._sync_stop_event.wait(remaining_delay)
 
     # ── Quick Force Gauge Wrappers ──
     def send_zero(self): self.run_async(lambda: self.log("Zero/Tare: OK") if self.ng.zero() else self.log("Zero failed."))
