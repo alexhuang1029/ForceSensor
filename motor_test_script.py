@@ -120,4 +120,4 @@ time.sleep(0.25)
 
 pi.set_PWM_dutycycle(LED_PIN, 75) # set PWM duty cycle 75/1000=7.5 per cent
 print("end")
-time.sleep(1) # delay 3s unlock successful
+time.sleep(1) # delay 3s unlock successful！
