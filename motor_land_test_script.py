@@ -1,10 +1,11 @@
-# v1 of this script. It is very elementary and is meant 
-# to be a simple test of the motor on land. 
+# v1 of this script. It is very elementary and is meant
+# to be a simple test of the motor on land.
 # When script is active, hold down 'w' to move forward.
-# Hold down 's' to move backward. Release keys to stop. 
+# Hold down 's' to move backward. Release keys to stop.
 # Press 'q' to quit the script.
 
 import curses
+from pickle import FALSE, TRUE
 import sys
 import time
 import pigpio
@@ -58,41 +59,45 @@ def main(stdscr):
                 last_key_time = now
 
                 if key in (ord("w"), ord("W")):
-                	target_duty = 80
-			turn_left = FALSE
-			turn_right = FALSE
+                    target_duty = 80
+                    turn_left = FALSE
+                    turn_right = FALSE
                 elif key in (ord("s"), ord("S")):
-                	target_duty = 70
-			turn_left = FALSE
-			turn_right = FALSE
-		elif key in (ord("a"), ord("A")):
-			target_duty = 80
-			turn_left = TRUE
-			turn_right = FALSE
-		elif key in (ord("d"), ord("D")):
-			target_duty = 80
-			turn_left = FALSE
-			turn_right = TRUE
+                    target_duty = 70
+                    turn_left = FALSE
+                    turn_right = FALSE
+                elif key in (ord("a"), ord("A")):
+                    target_duty = 80
+                    turn_left = TRUE
+                    turn_right = FALSE
+                elif key in (ord("d"), ord("D")):
+                    target_duty = 80
+                    turn_left = FALSE
+                    turn_right = TRUE
                 elif key in (ord("q"), ord("Q")):
                     break
                 else:
                     target_duty = 75
-		    turn_left = FALSE
-		    turn_right = FALSE
+                    turn_left = FALSE
+                    turn_right = FALSE
             else:
                 if now - last_key_time > 0.15:
                     target_duty = 75
+                    turn_left = FALSE
+                    turn_right = FALSE
 
             if target_duty != current_duty:
                 current_duty = target_duty
-		if turn_left == TRUE:
-			pi.set_PWM_dutycycle(MOTOR_PINS[0], target_duty)
-			pi.set_PWM_dutycycle(MOTOR_PINS[1], 75)
-		if turn_right == TRUE:
-			pi.set_PWM_dutycycle(MOTOR_PINS[1], target_duty)
-			pi.set_PWM_dutycycle(MOTOR_PINS[0], 75)
-		else:
-                	set_dual_dutycycle(current_duty)
+
+                if turn_left == TRUE:
+                    pi.set_PWM_dutycycle(MOTOR_PINS[0], target_duty)
+                    pi.set_PWM_dutycycle(MOTOR_PINS[1], 75)
+                elif turn_right == TRUE:
+                    pi.set_PWM_dutycycle(MOTOR_PINS[1], target_duty)
+                    pi.set_PWM_dutycycle(MOTOR_PINS[0], 75)
+                else:
+                    set_dual_dutycycle(current_duty)
+
                 stdscr.addstr(
                     6,
                     0,
