@@ -42,8 +42,8 @@ def main(stdscr):
     set_dual_dutycycle(current_duty)
 
     stdscr.addstr(0, 0, "=== Dual Motor Controller (GPIO 18 & 19) ===")
-    stdscr.addstr(1, 0, "Hold 'w' -> 76 (Forward)")
-    stdscr.addstr(2, 0, "Hold 's' -> 74 (Reverse)")
+    stdscr.addstr(1, 0, "Hold 'w' -> 80 (Forward)")
+    stdscr.addstr(2, 0, "Hold 's' -> 70 (Reverse)")
     stdscr.addstr(3, 0, "Release  -> 75 (Neutral)")
     stdscr.addstr(4, 0, "Press 'q' to quit.")
 
@@ -58,20 +58,41 @@ def main(stdscr):
                 last_key_time = now
 
                 if key in (ord("w"), ord("W")):
-                    target_duty = 76
+                	target_duty = 80
+			turn_left = FALSE
+			turn_right = FALSE
                 elif key in (ord("s"), ord("S")):
-                    target_duty = 74
+                	target_duty = 70
+			turn_left = FALSE
+			turn_right = FALSE
+		elif key in (ord("a"), ord("A")):
+			target_duty = 80
+			turn_left = TRUE
+			turn_right = FALSE
+		elif key in (ord("d"), ord("D")):
+			target_duty = 80
+			turn_left = FALSE
+			turn_right = TRUE
                 elif key in (ord("q"), ord("Q")):
                     break
                 else:
                     target_duty = 75
+		    turn_left = FALSE
+		    turn_right = FALSE
             else:
                 if now - last_key_time > 0.15:
                     target_duty = 75
 
             if target_duty != current_duty:
                 current_duty = target_duty
-                set_dual_dutycycle(current_duty)
+		if turn_left == TRUE:
+			pi.set_PWM_dutycycle(MOTOR_PINS[0], target_duty)
+			pi.set_PWM_dutycycle(MOTOR_PINS[1], 75)
+		if turn_right == TRUE:
+			pi.set_PWM_dutycycle(MOTOR_PINS[1], target_duty)
+			pi.set_PWM_dutycycle(MOTOR_PINS[0], 75)
+		else:
+                	set_dual_dutycycle(current_duty)
                 stdscr.addstr(
                     6,
                     0,
