@@ -71,23 +71,23 @@ def main(stdscr):
                         key_press_start_time = now
 
                     # Check if within boost duration
-                    is_boosting = (now - key_press_start_time) <= 0.5
+                    is_boosting = (now - key_press_start_time) <= 0.3
 
                     # Determine target duties based on movement type
                     if key_char == "w":
-                        target_duty = 80 if is_boosting else 79
+                        target_duty = 85 if is_boosting else 79
                         turn_left = False
                         turn_right = False
                     elif key_char == "s":
-                        target_duty = 70 if is_boosting else 71
+                        target_duty = 65 if is_boosting else 71
                         turn_left = False
                         turn_right = False
                     elif key_char == "a":
-                        target_duty = 80 if is_boosting else 79
+                        target_duty = 85 if is_boosting else 79
                         turn_left = True
                         turn_right = False
                     elif key_char == "d":
-                        target_duty = 80 if is_boosting else 79
+                        target_duty = 85 if is_boosting else 79
                         turn_left = False
                         turn_right = True
 
@@ -108,14 +108,14 @@ def main(stdscr):
                     turn_right = False
                 elif active_key:
                     # Still held down; re-evaluate boost state
-                    is_boosting = (now - key_press_start_time) <= 0.5
+                    is_boosting = (now - key_press_start_time) <= 0.3
 
                     if active_key == "w":
-                        target_duty = 80 if is_boosting else 79
+                        target_duty = 85 if is_boosting else 79
                     elif active_key == "s":
-                        target_duty = 70 if is_boosting else 71
+                        target_duty = 65 if is_boosting else 71
                     elif active_key in ("a", "d"):
-                        target_duty = 80 if is_boosting else 79
+                        target_duty = 85 if is_boosting else 79
 
             # Apply motor power output
             if turn_left:
@@ -130,7 +130,7 @@ def main(stdscr):
             current_duty = target_duty
 
             # UI Update
-            boosting_status = "ACTIVE" if active_key and (now - key_press_start_time <= 0.5) else "OFF"
+            boosting_status = "ACTIVE" if active_key and (now - key_press_start_time <= 0.3) else "OFF"
             stdscr.addstr(
                 7,
                 0,
